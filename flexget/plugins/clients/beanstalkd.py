@@ -2,9 +2,10 @@ from loguru import logger
 from flexget.entry import Entry
 from flexget.event import event
 from flexget import plugin
-from flexget.task import TaskAbort
+from flexget.task import PluginWarning
 import json
 import itertools
+from socket import gaierror
 logger = logger.bind(name='beanstalkd')
 
 
@@ -29,7 +30,10 @@ class PluginBeanstalkdBase:
     }
 
     def get_queue(self, beanstalkd_module, config):
-        queue = beanstalkd_module.Client(host=config.get('host'), port=config.get('port'), encoding='UTF-8')
+        try:
+            queue = beanstalkd_module.Client(host=config.get('host'), port=config.get('port'), encoding='UTF-8')
+        except (ConnectionRefusedError, gaierror):
+            raise PluginWarning('Connection to beanstalkd failed')
         queue.use(config.get('tube'))
         return queue
 
@@ -45,10 +49,7 @@ class PluginBeanstalkdBase:
 class PluginBeanstalkdInput(PluginBeanstalkdBase):
     def on_task_input(self, task, config):
         beanstalkd_module = self.get_beanstalkd_module()
-        try:
-            queue = self.get_queue(beanstalkd_module, config)
-        except ConnectionRefusedError:
-            raise TaskAbort('Connection to beanstalkd failed')
+        queue = self.get_queue(beanstalkd_module, config)
         queue.watch(config.get('tube'))
         beanstalkd_entries = []
         try:
@@ -86,10 +87,7 @@ class PluginBeanstalkdInput(PluginBeanstalkdBase):
 
     def on_task_output(self, task, config):
         beanstalkd_module = self.get_beanstalkd_module()
-        try:
-            queue = self.get_queue(beanstalkd_module, config)
-        except ConnectionRefusedError:
-            raise TaskAbort('Connection to beanstalkd failed')
+        queue = self.get_queue(beanstalkd_module, config)
 
         if task.accepted and task.rejected:
             entries_to_delete = itertools.chain(task.accepted, task.rejected)
@@ -124,11 +122,7 @@ class PluginBeanstalkdOutput(PluginBeanstalkdBase):
             return
 
         beanstalkd_module = self.get_beanstalkd_module()
-        try:
-            queue = self.get_queue(beanstalkd_module, config)
-        except ConnectionRefusedError:
-            raise TaskAbort('Connection to beanstalkd failed')
-
+        queue = self.get_queue(beanstalkd_module, config)
         for entry in task.accepted:
             try:
                 queue.put(json.dumps(Entry.serialize(entry)).encode('UTF-8'))
