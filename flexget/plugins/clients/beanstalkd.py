@@ -2,8 +2,11 @@ from loguru import logger
 from flexget.entry import Entry
 from flexget.event import event
 from flexget import plugin
+from flexget.task import TaskAbort
 import json
+import itertools
 logger = logger.bind(name='beanstalkd')
+
 
 class PluginBeanstalkdBase:
     schema = {
@@ -16,7 +19,8 @@ class PluginBeanstalkdBase:
                     'port': {'type': 'integer'},
                     'tube': {'type': 'string'},
                     'chunk_size': {'type': 'integer', 'default': 30},
-                    'timeout': {'type': 'integer', 'default': 1}
+                    'timeout': {'type': 'integer', 'default': 1},
+                    'delay': {'type': 'integer', 'default': 3600}
                 },
                 'required': ['host', 'port', 'tube'],
                 'additionalProperties': False,
@@ -41,7 +45,10 @@ class PluginBeanstalkdBase:
 class PluginBeanstalkdInput(PluginBeanstalkdBase):
     def on_task_input(self, task, config):
         beanstalkd_module = self.get_beanstalkd_module()
-        queue = self.get_queue(beanstalkd_module, config)
+        try:
+            queue = self.get_queue(beanstalkd_module, config)
+        except ConnectionRefusedError:
+            raise TaskAbort('Connection to beanstalkd failed')
         queue.watch(config.get('tube'))
         beanstalkd_entries = []
         try:
@@ -57,12 +64,12 @@ class PluginBeanstalkdInput(PluginBeanstalkdBase):
                 entry_data = beanstalkd_entry.body
                 try:
                     entry = Entry.deserialize(json.loads(entry_data), None)
+                    entry['beanstalkd_id'] = beanstalkd_entry.id
                     entries.append(entry)
                 except json.decoder.JSONDecodeError:
                     logger.error('Could not decode job {beanstalkd_entry.id}')
                     pass
                 try:
-                    queue.delete(beanstalkd_entry.id)
                     beanstalkd_entries.remove(beanstalkd_entry)
                 except beanstalkd_module.NotFoundError:
                     logger.error('Job {beanstalkd_entry.id} has gone away')
@@ -77,6 +84,39 @@ class PluginBeanstalkdInput(PluginBeanstalkdBase):
         queue.close()
         return entries
 
+    def on_task_output(self, task, config):
+        beanstalkd_module = self.get_beanstalkd_module()
+        try:
+            queue = self.get_queue(beanstalkd_module, config)
+        except ConnectionRefusedError:
+            raise TaskAbort('Connection to beanstalkd failed')
+
+        if task.accepted and task.rejected:
+            entries_to_delete = itertools.chain(task.accepted, task.rejected)
+        elif task.accepted:
+            entries_to_delete = task.accepted
+        elif task.rejected:
+            entries_to_delete = task.rejected
+        else:
+            entries_to_delete = []
+
+        for entry in entries_to_delete:
+            if 'beanstalkd_id' in entry:
+                beanstalkd_id = entry['beanstalkd_id']
+                try:
+                    queue.peek(beanstalkd_id)
+                    queue.delete(beanstalkd_id)
+                except beanstalkd_module.NotFoundError:
+                    logger.error('Job {beanstalkd_id} has gone away')
+
+        if task.undecided:
+            for entry in task.undecided:
+                if 'beanstalkd_id' in entry:
+                    beanstalkd_id = entry['beanstalkd_id']
+                    queue.peek(beanstalkd_id)
+                    queue.release(beanstalkd_id, delay=config.get('delay'))
+        queue.close()
+
 
 class PluginBeanstalkdOutput(PluginBeanstalkdBase):
     def on_task_output(self, task, config):
@@ -84,7 +124,11 @@ class PluginBeanstalkdOutput(PluginBeanstalkdBase):
             return
 
         beanstalkd_module = self.get_beanstalkd_module()
-        queue = self.get_queue(beanstalkd_module, config)
+        try:
+            queue = self.get_queue(beanstalkd_module, config)
+        except ConnectionRefusedError:
+            raise TaskAbort('Connection to beanstalkd failed')
+
         for entry in task.accepted:
             try:
                 queue.put(json.dumps(Entry.serialize(entry)).encode('UTF-8'))
