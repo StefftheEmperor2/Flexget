@@ -155,7 +155,7 @@ class PluginPyLoad:
         if version.parse(remote_version) >= version.parse('0.5'):
             parse_urls_command = 'parse_urls'
             add_package_command = 'add_package'
-            set_package_data_command = 'set_package_date'
+            set_package_data_command = 'set_package_data'
             is_pyload_ng = True
 
         hoster = config.get('hoster', self.DEFAULT_HOSTER)
